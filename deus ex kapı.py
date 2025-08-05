@@ -1,7 +1,7 @@
 import network, machine, socket,time
 
 
-ssid,password = 'Hypericum2','pErf0r4tUm'
+ssid,password = '000000','0000000'
 
 led = machine.Pin("LED", machine.Pin.OUT, value=1)
 pin_1up = machine.Pin(20, machine.Pin.OUT, value=0)
