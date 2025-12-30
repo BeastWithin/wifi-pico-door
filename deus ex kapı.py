@@ -7,6 +7,7 @@ pin_1down = machine.Pin(17, machine.Pin.OUT, value=1)
 pin_2up = machine.Pin(10, machine.Pin.OUT, value=1)
 pin_2down = machine.Pin (14, machine.Pin.OUT, value=1)
 doorstate = ("1. door opening.","1. door closing.","2. door opening.","2. door closing.")
+wlan=0
 
 def blink_led(frequency = 0.5, num_blinks = 1):
     for _ in range(num_blinks):
@@ -22,7 +23,7 @@ def webpage(temperature, state):
 <div class="endis" >
 <div style="width:20%;border-radius:5px;background: linear-gradient(160deg, #373858 0%, #a5a4f5 100%);"> 
 <img height="18px" width="18px"align="left" alt="DXlogo" width="40%" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAMAAABhEH5lAAAAbFBMVEUAAAAAAQQAAAcCAwkEBg4HCRIYGSAAAQ0TFBtmYmANDxhHR0ojJCpZVU8tLTJCQT46OkCDf353dHMOFC05Ny1dWlhxbWeOiYa3s7M1OVGemJUYHTErKCCGgXvJx8f7+/mlpKSAgYvm5+rCwsHuJdquAAAAuUlEQVQY00XPB26EMBAF0Knupne2Jve/Y8jCgqWRpSePvj8AADMh/B/E/QYUJx9jEf7S7abEyKJ6UtF1jsQGx8ciSVfGbKxJ9hAgjcPg+1TKVwBddP298YYuMhVRUdfFReSMFbuMjdJJKgJ+0rrC8xmzwONtZ38mbobpGdt2C7gImp95WmN5BTD8TnZu12yP7yNTeD6qYm1z2HsjkaTXa6l92ae9N2k5LuO9GXzORwFU45zZJgT9tPwDgA8IM61mBcIAAAAASUVORK5CYII=">Surveillance</div>
-<div style="width:600px;background-color:#615f62">
+<div style="width:100%;background-color:#615f62">
 Active Window Options <img src="mj13logo.svg" align="right" alt="DXlogo" width="22%" >
 <div>
  <form action="./control">
@@ -45,8 +46,10 @@ Active Window Options <img src="mj13logo.svg" align="right" alt="DXlogo" width="
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-.endis {width:1000px}
+.endis {width:60%}
 .cams div {float:left; border: solid 1px #000;border-radius:0px;width: 33%;height: 144px;margin: auto;background-image: repeating-radial-gradient(circle at 17% 32%, white, black 0.00085px);animation: back 5s linear infinite;}
 .cams {width:100%; overflow:auto;}
 input {color:white;background-color:#6c6b69; border: solid 2px #fff; width: 100px;  clip-path: polygon(0 5px,11px 0,100% 0,100% calc(100% - 5px),calc(100% - 11px) 100%,0 100%);}
@@ -60,9 +63,10 @@ div {border-radius: 3px 3px 3px 9px;}
 """
     html=head+body
     return html#temp.format(temperature,state)
-
+    
 def connect():
     #Connect to WLAN
+    global wlan
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     wlan.connect(ssid, password)
@@ -85,10 +89,11 @@ def open_socket(ip):
 
 def serve(connection):
     #Start a web server
+    global wlan
     state = 'OFF'
     led.toggle()
     temperature = 0
-    while True:
+    while wlan.isconnected():
         client = connection.accept()[0]
         request = client.recv(1024)
         request = str(request)
@@ -155,6 +160,7 @@ try:
     connection = open_socket(ip)
     print("Connection: ",connection)
     serve(connection)
+    machine.reset()
 except Exception as e:
     print(e)
     time.sleep(1)
