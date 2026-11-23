@@ -40,6 +40,14 @@ player, because go2rtc only accepts WebSocket connections from its own origin.
   pulses the relay for 0.5 s. A 2 s cooldown applies per door, and the opposite
   relay of the same door is checked first (software interlock).
 
+Text-only browsers (links, lynx, w3m) have no JavaScript, so the main page
+does not work there. Use the form version instead: `http://<pico-ip>/text`.
+It asks for the token in a form and has one button per door action.
+
+- `GET /text` - login form.
+- `POST /text` (form field `token`) - status and door buttons.
+- `POST /text/door` (form fields `token`, `door`, `dir`) - same rules as the API.
+
 The old `GET /control?...` endpoints were removed, because a plain GET could be
 triggered from any web page on the LAN.
 

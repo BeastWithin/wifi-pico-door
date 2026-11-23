@@ -198,6 +198,100 @@ def pulse(door, direction):
     return True, "ok"
 
 
+def url_decode(s):
+    s = s.replace("+", " ")
+    parts = s.split("%")
+    out = parts[0]
+    for part in parts[1:]:
+        try:
+            out += chr(int(part[:2], 16)) + part[2:]
+        except ValueError:
+            out += "%" + part
+    return out
+
+
+def form_parse(body):
+    out = {}
+    for pair in body.decode("utf-8", "ignore").split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            out[url_decode(k)] = url_decode(v)
+    return out
+
+
+def esc(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def text_page(message="", logged_in=False, token=""):
+    """Plain HTML with forms only - works in text browsers such as links (no JavaScript)."""
+    head = ('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Surveillance</title></head>'
+            '<body><h2>Surveillance (text)</h2>')
+    if message:
+        head += "<p><b>%s</b></p>" % esc(message)
+    if not logged_in:
+        body = ('<form method="post" action="/text">'
+                'Access token: <input type="password" name="token" size="48"> '
+                '<input type="submit" value="Enter"></form>')
+        return head + body + "</body></html>"
+    body = ("<p>Door 1: %s</p><p>Door 2: %s</p><p>Temperature: %s</p>"
+            % (esc(door_status(1)), esc(door_status(2)), esc(round(onboard_temp(), 1))))
+    for door, direction, label in ((1, "up", "Door 1 Open"), (1, "down", "Door 1 Close"),
+                                   (2, "up", "Door 2 Open"), (2, "down", "Door 2 Close")):
+        body += ('<form method="post" action="/text/door">'
+                 '<input type="hidden" name="token" value="%s">'
+                 '<input type="hidden" name="door" value="%d">'
+                 '<input type="hidden" name="dir" value="%s">'
+                 '<input type="submit" value="%s"></form>') % (esc(token), door, direction, label)
+    body += ('<p><a href="/text">Logout</a> &nbsp; <a href="/">Full page (needs JavaScript)</a></p>'
+             '</body></html>')
+    return head + body
+
+
+def check_token(token):
+    return same_secret(token, api_token)
+
+
+def handle_text(cl, ip, method, path, body):
+    if method == "GET" and path == "/text":
+        return send(cl, "200 OK", "text/html; charset=utf-8", text_page())
+
+    if method == "POST" and path == "/text":
+        f = form_parse(body)
+        token = f.get("token", "")
+        if not check_token(token):
+            log("text auth fail", ip)
+            time.sleep(1)
+            return send(cl, "401 Unauthorized", "text/html; charset=utf-8",
+                        text_page("Wrong token.", False))
+        return send(cl, "200 OK", "text/html; charset=utf-8",
+                    text_page("", True, token))
+
+    if method == "POST" and path == "/text/door":
+        f = form_parse(body)
+        token = f.get("token", "")
+        if not check_token(token):
+            log("text auth fail", ip)
+            time.sleep(1)
+            return send(cl, "401 Unauthorized", "text/html; charset=utf-8",
+                        text_page("Wrong token.", False))
+        try:
+            door = int(f.get("door", "0"))
+        except ValueError:
+            door = 0
+        direction = f.get("dir", "")
+        if door not in (1, 2) or direction not in ("up", "down"):
+            return send(cl, "400 Bad Request", "text/html; charset=utf-8",
+                        text_page("Bad door command.", True, token))
+        ok, why = pulse(door, direction)
+        log("text door", door, direction, "from", ip, "->", why)
+        msg = "Door %d %s sent." % (door, "open" if direction == "up" else "close") if ok else "Not sent: " + why
+        return send(cl, "200 OK" if ok else "409 Conflict", "text/html; charset=utf-8",
+                    text_page(msg, True, token))
+
+    return send(cl, "405 Method Not Allowed", "text/plain", "method not allowed")
+
+
 def handle(cl, addr):
     ip = addr[0] if addr else "?"
     req = read_request(cl)
@@ -213,6 +307,9 @@ def handle(cl, addr):
     if method == "GET" and path in STATIC_FILES:
         fname, ctype = STATIC_FILES[path]
         return send_file(cl, fname, ctype)
+
+    if path in ("/text", "/text/door"):
+        return handle_text(cl, ip, method, path, body)
 
     if path.startswith("/api/"):
         if not authorized(headers):
