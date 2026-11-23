@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Surveillance</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #000; color: #fff; font-family: Arial, Helvetica, sans-serif; }
+  body { padding: 10px; }
+
+  /* outer window */
+  .window { max-width: 640px; margin: 0 auto; background: #615f62; border: 1px solid #000; }
+  .titlebar {
+    display: inline-block; margin: 0; padding: 2px 14px 2px 8px; font-size: 13px; font-weight: bold;
+    color: #000; background: linear-gradient(160deg, rgba(55,56,88,1) 0%, rgba(165,164,245,1) 100%);
+    border-radius: 0 0 8px 0; letter-spacing: .5px;
+  }
+  .titlebar-row { background: #000; padding: 2px 0 0 0; }
+
+  .top { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px; }
+  @media (max-width: 520px) { .top { grid-template-columns: 1fr; } }
+
+  .panel { background: #2b2b2d; border: 1px solid #000; padding: 6px 8px 8px; }
+  .panel h3 {
+    margin: -6px -8px 8px; padding: 3px 8px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .5px; color: #c9c9d3; background: #3b3b3e; border-bottom: 1px solid #000;
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .row .lbl { width: 118px; font-size: 13px; }
+  .field {
+    flex: 1; min-width: 0; font-family: monospace; font-size: 13px; color: #bff7bf;
+    background: #000; border: 1px solid #6b6b72; padding: 4px 6px;
+    clip-path: polygon(0 4px,8px 0,100% 0,100% calc(100% - 4px),calc(100% - 8px) 100%,0 100%);
+  }
+  .field.warn { color: #f5d37a; }
+  .field.bad { color: #f58a8a; }
+
+  button {
+    font-family: Arial, Helvetica, sans-serif; font-size: 13px; color: #111; cursor: pointer;
+    background: #d4d2d4; border: 0; padding: 6px 10px; min-width: 96px; text-align: left;
+    clip-path: polygon(0 5px,11px 0,100% 0,100% calc(100% - 5px),calc(100% - 11px) 100%,0 100%);
+  }
+  button:hover { background: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.logout { min-width: 110px; text-align: center; background: #c7b3b3; }
+
+  .doors { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+  .door { background: #000; border: 1px solid #6b6b72; padding: 6px; }
+  .door .name { font-size: 12px; color: #c9c9d3; margin-bottom: 6px; }
+  .door .btns { display: flex; gap: 6px; margin-bottom: 6px; }
+  .door .btns button { min-width: 0; flex: 1; text-align: center; }
+
+  /* cameras */
+  .cams { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 6px; }
+  @media (max-width: 620px) { .cams { grid-template-columns: 1fr; } }
+  .cam { background: #000; border: 1px solid #000; }
+  .cam .view { position: relative; aspect-ratio: 16 / 9;  /* cameras send 1280x720 */ background: #000; overflow: hidden; }
+  .cam iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 1; }
+  .cam .hit { position: absolute; inset: 0; z-index: 3; cursor: pointer; }
+  .cam .off {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: #bdbdc6; z-index: 2; pointer-events: none;
+  }
+  .cam .caption {
+    font-size: 12px; padding: 4px 6px; min-height: 22px; color: #e5e5ea;
+    background: #2b2b2d; border-top: 1px solid #000;
+  }
+  .cam.selected .caption { background: #3b3b3e; color: #fff; }
+  .cam.full { position: fixed; inset: 0; z-index: 10; border: 0; background: #000; }
+  .cam.full .view { aspect-ratio: auto; height: calc(100vh - 26px); }
+  .cam.full .caption { display: none; }
+
+  .hint {
+    margin: 8px 6px 0; padding: 6px 8px; font-size: 12px; color: #d8d8e0;
+    background: #4b4b4d; border: 1px solid #000; border-radius: 8px 0 0 0;
+  }
+  .footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 6px; }
+  .log { font-family: monospace; font-size: 12px; color: #c8c8d0; min-height: 16px; }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar-row"><span class="titlebar">Surveillance</span></div>
+
+  <div class="top">
+    <section class="panel">
+      <h3>Active Window Options</h3>
+      <div class="row"><span class="lbl">Camera Status</span><div class="field" id="st-cam">CONNECTING</div></div>
+      <div class="row"><span class="lbl">Door Access</span><div class="field" id="st-link">CONNECTING</div></div>
+      <div class="row"><span class="lbl">Door Status</span><div class="field" id="st-doors">UNKNOWN</div></div>
+      <div class="row"><span class="lbl">Temperature</span><div class="field" id="st-temp">--</div></div>
+    </section>
+
+    <section class="panel">
+      <h3>Door Control</h3>
+      <div class="doors">
+        <div class="door">
+          <div class="name">Door 1</div>
+          <div class="btns">
+            <button data-door="1" data-dir="up" disabled>Open</button>
+            <button data-door="1" data-dir="down" disabled>Close</button>
+          </div>
+          <div class="field" id="st-door1">UNKNOWN</div>
+        </div>
+        <div class="door">
+          <div class="name">Door 2</div>
+          <div class="btns">
+            <button data-door="2" data-dir="up" disabled>Open</button>
+            <button data-door="2" data-dir="down" disabled>Close</button>
+          </div>
+          <div class="field" id="st-door2">UNKNOWN</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="cams" id="cams">
+    <div class="cam" data-src="pharmacy_front">
+      <div class="view"><div class="off">Camera Connecting</div><span class="hit"></span></div>
+      <div class="caption">Camera 1 : Front</div>
+    </div>
+    <div class="cam" data-src="pharmacy_back">
+      <div class="view"><div class="off">Camera Connecting</div><span class="hit"></span></div>
+      <div class="caption">Camera 2 : Back</div>
+    </div>
+    <div class="cam">
+      <div class="view"><div class="off">Camera Off</div></div>
+      <div class="caption">Camera 3 : Not connected</div>
+    </div>
+  </div>
+
+  <div class="hint" id="mf">Click on a camera view to select that camera.</div>
+
+  <div class="footer">
+    <div class="log" id="log"></div>
+    <button class="logout" id="disconnect">Logout</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const GO2RTC = 'http://192.168.1.2:1984';   // go2rtc server (cameras)
+  const POLL_MS = 3000;
+  const COOLDOWN_MS = 2000;
+  const TOKEN_KEY = 'dxToken';
+
+  const $ = (s) => document.querySelector(s);
+  const $$ = (s) => [...document.querySelectorAll(s)];
+  const logEl = $('#log');
+  const log = (m) => { logEl.textContent = `[${new Date().toLocaleTimeString()}] ${m}`; };
+
+  const getToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; } };
+  const setToken = (t) => { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} };
+  const clearToken = () => { try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {} };
+  const askToken = () => { const t = prompt('Access token:'); if (t) setToken(t.trim()); return getToken(); };
+  const ensureToken = () => getToken() || askToken();
+
+  async function api(path, opts = {}) {
+    const token = ensureToken();
+    if (!token) throw new Error('no token');
+    const res = await fetch(path, { ...opts, cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Token': token, ...(opts.headers || {}) } });
+    if (res.status === 401) { clearToken(); throw new Error('unauthorized'); }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  }
+
+  function setVal(sel, text, cls = '') {
+    const el = $(sel);
+    el.textContent = text;
+    el.className = 'field ' + cls;
+  }
+
+  async function poll() {
+    if (!getToken()) {                 // locked: never prompt from the timer
+      setVal('#st-link', 'LOCKED', 'warn');
+      $$('button[data-door]').forEach(b => b.disabled = true);
+      return;
+    }
+    try {
+      const s = await api('/api/status');
+      setVal('#st-link', 'ONLINE');
+      setVal('#st-door1', (s.door1 || 'unknown').toUpperCase(), s.door1 === 'moving' ? 'warn' : '');
+      setVal('#st-door2', (s.door2 || 'unknown').toUpperCase(), s.door2 === 'moving' ? 'warn' : '');
+      setVal('#st-doors', `${(s.door1 || '?').toUpperCase()} / ${(s.door2 || '?').toUpperCase()}`);
+      setVal('#st-temp', s.temp != null ? s.temp.toFixed(1) + ' °C' : '--');
+      $$('button[data-door]').forEach(b => b.disabled = false);
+    } catch (e) {
+      setVal('#st-link', e.message === 'unauthorized' ? 'ACCESS DENIED' : 'NO LINK', 'bad');
+      $$('button[data-door]').forEach(b => b.disabled = true);
+    }
+  }
+
+  $$('button[data-door]').forEach(btn => btn.addEventListener('click', async () => {
+    const door = Number(btn.dataset.door), dir = btn.dataset.dir;
+    const all = $$('button[data-door]');
+    all.forEach(b => b.disabled = true);
+    log(`door ${door} ${dir} requested`);
+    try {
+      const r = await api('/api/door', { method: 'POST', body: JSON.stringify({ door, dir }) });
+      log(r.message || 'ok');
+    } catch (e) { log('failed: ' + e.message); }
+    finally { setTimeout(() => { all.forEach(b => b.disabled = false); poll(); }, COOLDOWN_MS); }
+  }));
+
+  // Logout locks the terminal; pressing again asks for the token and unlocks.
+  $('#disconnect').addEventListener('click', () => {
+    if (getToken()) {
+      clearToken();
+      $('#disconnect').textContent = 'Login';
+      log('session cleared');
+    } else if (askToken()) {
+      $('#disconnect').textContent = 'Logout';
+    }
+    poll();
+  });
+  $('#disconnect').textContent = getToken() ? 'Logout' : 'Login';
+
+  // cameras: go2rtc's own player page, framed (go2rtc only accepts WebSocket
+  // connections from its own origin, so the page must come from go2rtc, not the Pico).
+  let loaded = 0, total = 0;
+  $$('#cams .cam[data-src]').forEach(cell => {
+    total++;
+    const f = document.createElement('iframe');
+    f.src = `${GO2RTC}/stream.html?src=${encodeURIComponent(cell.dataset.src)}&mode=webrtc,mse,hls&background=false&width=100%25`;
+    f.allow = 'autoplay';
+    f.scrolling = 'no';
+    f.title = cell.dataset.src;
+    f.addEventListener('load', () => {
+      loaded++;
+      setVal('#st-cam', `${loaded}/${total} feeds`, loaded === total ? '' : 'warn');
+      const off = cell.querySelector('.off'); if (off) off.remove();
+    });
+    cell.querySelector('.view').insertBefore(f, cell.querySelector('.hit'));
+  });
+  setVal('#st-cam', 'CONNECTING', 'warn');
+
+  // click a camera to select it and enlarge; click again to return
+  $$('#cams .cam .hit').forEach(hit => hit.addEventListener('click', () => {
+    const cell = hit.closest('.cam');
+    const full = !cell.classList.contains('full');
+    $$('#cams .cam').forEach(c => { c.classList.remove('full'); c.classList.remove('selected'); });
+    if (full) { cell.classList.add('full'); cell.classList.add('selected'); }
+    $('#mf').textContent = full ? 'Click the camera view again to return.' : 'Click on a camera view to select that camera.';
+  }));
+
+  if (!getToken()) askToken();       // one prompt on load
+  poll();
+  setInterval(poll, POLL_MS);
+})();
+</script>
+</body>
+</html>

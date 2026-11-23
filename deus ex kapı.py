@@ -1,190 +1,291 @@
-import network, machine, socket, time, gc
+# Pico W door controller - hardened DRAFT (not flashed yet)
+#
+# Changes from the running main.py:
+#  * Door commands are POST /api/door with a JSON body (GET no longer moves anything,
+#    so a web page or <img> tag on the LAN cannot trigger the doors).
+#  * Every /api/* call needs the X-Token header (constant-time compare).
+#  * Per-door cooldown and a software interlock (never pulse Up and Down together).
+#  * The control page is served from flash (dx.html), not from an f-string in RAM.
+#  * Request parsing uses real bytes instead of str(request).split().
+#
+# Wiring/pulse behaviour is kept identical to main.py: idle HIGH, active-low pulse
+# of 0.5 s on the relay pin.
+#
+# Required line in psw.py (generate the value once, keep it secret):
+#   api_token = "<output of: python3 -c 'import secrets;print(secrets.token_urlsafe(32))'>"
+# Deploy with:  mpremote cp dx.html :dx.html  &&  mpremote cp main_secure.py :main.py
+
+import network, socket, time, gc, os, json
 from machine import WDT, Pin, ADC
-from psw import *
+from psw import ssid, password, api_token
 
-# Initialize Hardware Watchdog (8-second timeout)
-# If the CPU or Wi-Fi stack freezes for >8s, the hardware forces a reboot.
-wdt = WDT(timeout=8000)
-
-led = Pin("LED", Pin.OUT, value=1)
-pin_1up = Pin(20, Pin.OUT, value=1)
-pin_1down = Pin(17, Pin.OUT, value=1)
-pin_2up = Pin(10, Pin.OUT, value=1)
-pin_2down = Pin(14, Pin.OUT, value=1)
-doorstate = ("1. door opening.", "1. door closing.", "2. door opening.", "2. door closing.")
-
-def blink_led(frequency=0.5, num_blinks=1):
-    for _ in range(num_blinks):
-        led.toggle()
-        time.sleep(frequency)
-        led.toggle()
-        time.sleep(frequency)
-
-def webpage(temperature, state):
-    body = f"""
-<body style="fcw bgb ff">
-<div class="endis" >
-<div style="width:20%;border-radius:5px;background: linear-gradient(160deg, #373858 0%, #a5a4f5 100%);">
-<img height="18px" width="18px" align="left" alt="DXlogo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAMAAABhEH5lAAAAbFBMVEUAAAAAAQQAAAcCAwkEBg4HCRIYGSAAAQ0TFBtmYmANDxhHR0ojJCpZVU8tLTJCQT46OkCDf353dHMOFC05Ny1dWlhxbWeOiYa3s7M1OVGemJUYHTErKCCGgXvJx8f7+/mlpKSAgYvm5+rCwsHuJdquAAAAuUlEQVQY00XPB26EMBAF0Knupne2Jve/Y8jCgqWRpSePvj8AADMh/B/E/QYUJx9jEf7S7abEyKJ6UtF1jsQGx8ciSVfGbKxJ9hAgjcPg+1TKVwBddP298YYuMhVRUdfFReSMFbuMjdJJKgJ+0rrC8xmzwONtZ38mbobpGdt2C7gImp95WmN5BTD8TnZu12yP7yNTeD6qYm1z2HsjkaTXa6l92ae9N2k5LuO9GXzORwFU45zZJgT9tPwDgA8IM61mBcIAAAAASUVORK5CYII=">Surveillance</div>
-<div style="width:100%;background-color:#615f62">
-Active Window Options <img src="mj13logo.svg" align="right" alt="DXlogo" width="22%" >
-<div>
- <form action="./control">
-  <input class="bt ff" type="submit" name="door1" value="Up"><input placeholder="{state}" type="text"/><br>
-  <input class="bt ff" type="submit" name="door1" value="Down"><input placeholder="{state}" type="text"/><br>
-  <input class="bt ff" type="submit" name="door2" value="Up"><input placeholder="{state}" type="text"/><br>
-  <input class="bt ff" type="submit" name="door2" value="Down"><input placeholder="{state}" type="text"/>
-</div>
- <div class="cams">
-  <div>cam1</div><div>cam2</div><div>cam3</div>
- </div>
- <div class="mf">Temperature is {temperature}</div>
-</div>
-<div style="transform: translate(90%, 90%);"><input type="submit" value="Disconnect" style="align:right;width:auto"></div>
-</div>
-</body>
-</html>
-"""
-    head = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-.endis {width:60%}
-.cams div {float:left; border: solid 1px #000;border-radius:0px;width: 33%;height: 144px;margin: auto;background-image: repeating-radial-gradient(circle at 17% 32%, white, black 0.00085px);animation: back 5s linear infinite;}
-.cams {width:100%; overflow:auto;}
-input {color:white;background-color:#6c6b69; border: solid 2px #fff; width: 100px;  clip-path: polygon(0 5px,11px 0,100% 0,100% calc(100% - 5px),calc(100% - 11px) 100%,0 100%);}
-.bt {font-family:Arial, Helvetica, sans-serif;width: 160px; text-align:left; color:white; background-color: #d4d2d4; clip-path: polygon(0 5px,11px 0,100% 0,100% calc(100% - 5px),calc(100% - 11px) 100%,0 100%);}
-div {border-radius: 3px 3px 3px 9px;}
-.mf {text-align:center;background-color:#4b4b4d;position:middle;width:90%;border-width:1px;border-color:black;border-style:solid;border-radius:8px 0px 0px 0px}
-.bgw {background-color:#fff;} .bgb {background-color:#000;} .fcw {color:#fff;} .fcb {color:#000;} .ff {font-family:Arial, Helvetica, sans-serif; }
-@keyframes back {from {background-size: 100% 100%;}to{background-size: 200% 200%;}
+WEB_FILE = "dx.html"
+STATIC_FILES = {
+    "/mj13logo.svg": ("mj13logo.svg", "image/svg+xml"),
+    "/video-stream.js": ("video-stream.js", "text/javascript"),
+    "/video-rtc.js": ("video-rtc.js", "text/javascript"),
 }
-</style></head>
-"""
-    return head + body
+PULSE_S = 0.5            # same pulse as the original firmware
+COOLDOWN_MS = 2000       # minimum gap between commands for the same door
+MOVING_MS = 3000         # how long a door shows as MOVING after a command
+MAX_HEADER = 2048
+MAX_BODY = 512
 
-def connect():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    # Disable Wi-Fi power-saving mode (0xa11154) to eliminate dropouts
-    wlan.config(pm=0xa11154)
+if not api_token or len(api_token) < 24:
+    raise SystemExit("api_token missing or too short in psw.py - refusing to start")
 
-    if not wlan.isconnected():
-        print('Connecting to network...')
-        wlan.connect(ssid, password)
-        retry_count = 0
-        while not wlan.isconnected():
-            wdt.feed()  # Keep WDT alive while waiting for Wi-Fi association
-            print('Waiting for connection...')
-            blink_led(0.2, 1)
-            time.sleep(0.8)
-            retry_count += 1
-            if retry_count > 15:
-                raise OSError("Wi-Fi connection attempt timed out")
+wdt = WDT(timeout=8000)  # hardware watchdog, same as before
+led = Pin("LED", Pin.OUT, value=1)
 
-    ip = wlan.ifconfig()[0]
-    print(f'Connected on {ip}')
-    return wlan, ip
+# relay pins, idle HIGH (value=1), pulse LOW (value=0)
+RELAY = {
+    (1, "up"): Pin(20, Pin.OUT, value=1),
+    (1, "down"): Pin(17, Pin.OUT, value=1),
+    (2, "up"): Pin(10, Pin.OUT, value=1),
+    (2, "down"): Pin(14, Pin.OUT, value=1),
+}
+last_cmd_ms = {1: None, 2: None}
+last_dir = {1: None, 2: None}
+wlan = None
 
-def open_socket(ip):
-    address = (ip, 80)
-    connection = socket.socket()
-    connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    connection.bind(address)
-    connection.listen(1)
-    # Set 2.0s socket timeout so connection.accept() won't block indefinitely
-    connection.settimeout(2.0)
-    return connection
 
-def control_door(cmd):
-    if cmd == doorstate[0]:
-        pin_1up.toggle()
-        time.sleep(0.5)
-        pin_1up.toggle()
-    elif cmd == doorstate[1]:
-        pin_1down.toggle()
-        time.sleep(0.5)
-        pin_1down.toggle()
-    elif cmd == doorstate[2]:
-        pin_2up.toggle()
-        time.sleep(0.5)
-        pin_2up.toggle()
-    elif cmd == doorstate[3]:
-        pin_2down.toggle()
-        time.sleep(0.5)
-        pin_2down.toggle()
+def log(*args):
+    print(*args)
+
 
 def onboard_temp():
     adc = ADC(4)
-    ADC_voltage = adc.read_u16() * (3.3 / 65536)
-    return 27 - (ADC_voltage - 0.706) / 0.001721
+    v = adc.read_u16() * (3.3 / 65536)
+    return 27 - (v - 0.706) / 0.001721
 
-def serve(connection, wlan):
-    state = 'OFF'
-    while wlan.isconnected():
-        wdt.feed()  # Reset 8-second watchdog timer on every loop
 
-        try:
-            client, addr = connection.accept()
-        except OSError:
-            # Socket timeout hit; loop again and check wlan.isconnected()
+def same_secret(a, b):
+    if a is None or b is None or len(a) != len(b):
+        return False
+    diff = 0
+    for x, y in zip(a, b):
+        diff |= ord(x) ^ ord(y)
+    return diff == 0
+
+
+def authorized(headers):
+    return same_secret(headers.get("x-token"), api_token)
+
+
+def connect():
+    global wlan
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.config(pm=0xa11154)
+    if not wlan.isconnected():
+        wlan.connect(ssid, password)
+        tries = 0
+        while not wlan.isconnected():
+            wdt.feed()
+            led.toggle()
+            time.sleep(0.8)
+            tries += 1
+            if tries > 30:
+                raise OSError("Wi-Fi timeout")
+    led.value(1)
+    return wlan.ifconfig()[0]
+
+
+def open_server(ip):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((ip, 80))
+    s.listen(6)  # browsers open several parallel connections
+    s.settimeout(2.0)
+    return s
+
+
+def read_request(cl):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = cl.recv(256)
+        if not chunk:
+            return None
+        data += chunk
+        if len(data) > MAX_HEADER:
+            return None
+    cut = data.find(b"\r\n\r\n")
+    head = data[:cut].decode("utf-8", "ignore")
+    body = data[cut + 4:]
+    lines = head.split("\r\n")
+    parts = lines[0].split(" ")
+    if len(parts) < 2:
+        return None
+    method, path = parts[0], parts[1]
+    headers = {}
+    for ln in lines[1:]:
+        if ":" in ln:
+            k, v = ln.split(":", 1)
+            headers[k.strip().lower()] = v.strip()
+    n = int(headers.get("content-length", "0"))
+    if n > MAX_BODY:
+        return None
+    while len(body) < n:
+        chunk = cl.recv(n - len(body))
+        if not chunk:
+            break
+        body += chunk
+    return method, path, headers, body[:n]
+
+
+def send_all(cl, data):
+    # MicroPython socket.send may accept only part of the buffer; keep sending the rest
+    mv = memoryview(data)
+    while len(mv):
+        n = cl.send(mv) or 0
+        if n == 0:
+            wdt.feed()
+            time.sleep_ms(10)
             continue
+        mv = mv[n:]
 
+
+def send(cl, status, ctype, body):
+    if isinstance(body, str):
+        body = body.encode()
+    head = ("HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+            "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+            "Connection: close\r\n\r\n") % (status, ctype, len(body))
+    send_all(cl, head.encode())
+    send_all(cl, body)
+
+
+def send_file(cl, fname, ctype):
+    try:
+        size = os.stat(fname)[6]
+    except OSError:
+        return send(cl, "404 Not Found", "text/plain", "not found")
+    head = ("HTTP/1.0 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+            "Cache-Control: no-store\r\nConnection: close\r\n\r\n") % (ctype, size)
+    send_all(cl, head.encode())
+    with open(fname, "rb") as f:
+        while True:
+            chunk = f.read(512)
+            if not chunk:
+                break
+            send_all(cl, chunk)
+            wdt.feed()
+
+
+def door_status(door):
+    t = last_cmd_ms[door]
+    if t is None:
+        return "unknown"
+    if time.ticks_diff(time.ticks_ms(), t) < MOVING_MS:
+        return "moving"
+    return "idle"
+
+
+def pulse(door, direction):
+    """Refuse if the opposite relay of the same door is not idle; otherwise pulse."""
+    opposite = "down" if direction == "up" else "up"
+    if RELAY[(door, opposite)].value() == 0:
+        return False, "interlock: opposite relay active"
+    now = time.ticks_ms()
+    if last_cmd_ms[door] is not None and time.ticks_diff(now, last_cmd_ms[door]) < COOLDOWN_MS:
+        return False, "cooldown"
+    pin = RELAY[(door, direction)]
+    pin.value(0)
+    time.sleep(PULSE_S)
+    pin.value(1)
+    last_cmd_ms[door] = time.ticks_ms()
+    last_dir[door] = direction
+    return True, "ok"
+
+
+def handle(cl, addr):
+    ip = addr[0] if addr else "?"
+    req = read_request(cl)
+    if req is None:
+        return
+    method, full_path, headers, body = req
+    path = full_path.split("?", 1)[0]
+    wdt.feed()
+
+    if method == "GET" and path in ("/", "/index.html"):
+        return send_file(cl, WEB_FILE, "text/html; charset=utf-8")
+
+    if method == "GET" and path in STATIC_FILES:
+        fname, ctype = STATIC_FILES[path]
+        return send_file(cl, fname, ctype)
+
+    if path.startswith("/api/"):
+        if not authorized(headers):
+            log("auth fail", ip, method, path)
+            time.sleep(1)  # slow down guessing
+            return send(cl, "401 Unauthorized", "application/json", '{"error":"unauthorized"}')
+
+        if method == "GET" and path == "/api/status":
+            temp = onboard_temp()
+            data = {
+                "door1": door_status(1),
+                "door2": door_status(2),
+                "temp": round(temp, 1),
+            }
+            return send(cl, "200 OK", "application/json", json.dumps(data))
+
+        if method == "POST" and path == "/api/door":
+            try:
+                cmd = json.loads(body.decode())
+                door = int(cmd.get("door"))
+                direction = str(cmd.get("dir"))
+            except Exception:
+                return send(cl, "400 Bad Request", "application/json", '{"error":"bad body"}')
+            if door not in (1, 2) or direction not in ("up", "down"):
+                return send(cl, "400 Bad Request", "application/json", '{"error":"bad door/dir"}')
+            ok, why = pulse(door, direction)
+            log("door", door, direction, "from", ip, "->", why)
+            if not ok:
+                return send(cl, "409 Conflict", "application/json",
+                            json.dumps({"ok": False, "message": why}))
+            return send(cl, "200 OK", "application/json",
+                        json.dumps({"ok": True, "message": "door %d %s" % (door, direction)}))
+
+    return send(cl, "404 Not Found", "text/plain", "not found")
+
+
+def serve(server, wl):
+    while wl.isconnected():
+        wdt.feed()
+        try:
+            cl, addr = server.accept()
+        except OSError:
+            continue  # accept timeout; loop and feed the watchdog
+        try:
+            cl.settimeout(2.0)
+            handle(cl, addr)
+        except Exception as e:
+            log("handler error:", e)
+        finally:
+            cl.close()
+            gc.collect()
+
+
+def main():
+    while True:
+        server = None
         try:
             wdt.feed()
-            client.settimeout(2.0)
-            request = client.recv(1024)
-            request = str(request)
-
-            query = ""
-            try:
-                query = request.split()[1]
-                print("**Sorgu** ", query)
-            except IndexError:
-                pass
-
-            if query == '/control?door1=Up':
-                state = doorstate[0]
-                control_door(state)
-            elif query == '/control?door1=Down':
-                state = doorstate[1]
-                control_door(state)
-            elif query == '/control?door2=Up':
-                state = doorstate[2]
-                control_door(state)
-            elif query == '/control?door2=Down':
-                state = doorstate[3]
-                control_door(state)
-
-            temperature = onboard_temp()
-            html = webpage(temperature, state)
-            client.send(html)
-        except Exception as err:
-            print("Client handler error:", err)
+            ip = connect()
+            server = open_server(ip)
+            log("server active on", ip)
+            serve(server, wlan)
+            log("Wi-Fi dropped, reconnecting")
+        except Exception as e:
+            log("main loop:", e)
         finally:
-            client.close()
-            gc.collect()  # Clean up memory after serving the dynamic HTML response
+            if server:
+                try:
+                    server.close()
+                except Exception:
+                    pass
+            gc.collect()
+            time.sleep(2)
 
-# Outer Execution Loop
-while True:
-    connection = None
-    try:
-        wdt.feed()
-        wlan, ip = connect()
-        connection = open_socket(ip)
-        print("Server active on IP:", ip)
-        serve(connection, wlan)
-        print("Wi-Fi connection dropped. Reconnecting...")
-    except Exception as e:
-        print("Main loop exception:", e)
-    finally:
-        if connection:
-            try:
-                connection.close()
-            except Exception:
-                pass
-        gc.collect()
-        time.sleep(2)
+
+main()
